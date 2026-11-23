@@ -1,0 +1,1836 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Agent 代码与运行过程交互式图解 — agent.py & tools.py</title>
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg-app: #0b1120;
+      --bg-panel: #0f172a;
+      --bg-card: #1e293b;
+      --border-subtle: #1e293b;
+      --border-strong: #334155;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      height: 100%;
+      width: 100%;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+      background-color: var(--bg-app);
+      color: #e2e8f0;
+    }
+    .app-shell {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      height: 100dvh;
+      width: 100%;
+      overflow: hidden;
+    }
+    .workspace-grid {
+      flex: 1 1 0%;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(300px, 40%) minmax(0, 1fr);
+      width: 100%;
+      overflow: hidden;
+    }
+    .left-pane, .right-pane {
+      height: 100%;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .diagram-section {
+      flex: 1 1 74%;
+      min-height: 280px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      transition: flex-basis 0.18s ease;
+    }
+    .inspector-section {
+      flex: 0 0 26%;
+      min-height: 150px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .right-pane.diagram-expanded .diagram-section {
+      flex: 1 1 100%;
+    }
+    .right-pane.diagram-expanded .inspector-section {
+      flex: 0 0 34px;
+      min-height: 34px;
+    }
+    .right-pane.diagram-expanded #inspector-scroll-area {
+      display: none;
+    }
+    .diagram-canvas-wrap {
+      flex: 1 1 0%;
+      min-height: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: auto;
+      position: relative;
+    }
+    .diagram-canvas-wrap svg {
+      width: 100%;
+      height: 100%;
+      display: block;
+      transition: width 0.15s ease, height 0.15s ease;
+    }
+
+    /* On very narrow mobile screens (<720px), keep diagram pinned in top half and code scrollable in bottom half */
+    @media (max-width: 719px) {
+      .workspace-grid {
+        grid-template-columns: 1fr;
+        grid-template-rows: 46% 54%;
+      }
+      .right-pane {
+        order: -1;
+        border-bottom: 1px solid #1e293b;
+      }
+      .diagram-section {
+        flex: 1 1 0%;
+        min-height: 0;
+      }
+      .inspector-section {
+        flex: 0 0 38%;
+      }
+    }
+    .font-mono-code {
+      font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    /* Custom Scrollbar */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #0f172a; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 9999px; }
+    ::-webkit-scrollbar-thumb:hover { background: #475569; }
+
+    /* Code line styling */
+    .code-line {
+      display: flex;
+      align-items: flex-start;
+      padding: 2px 12px 2px 0;
+      cursor: pointer;
+      border-left: 3px solid transparent;
+      transition: background-color 0.15s ease, border-color 0.15s ease;
+      line-height: 1.55;
+      font-size: 12.5px;
+    }
+    .code-line:hover {
+      background-color: rgba(56, 189, 248, 0.08);
+    }
+    .code-line.active-line {
+      background-color: rgba(56, 189, 248, 0.16);
+      border-left-color: var(--active-accent, #38bdf8);
+    }
+    .code-line.active-line .line-num {
+      color: #f8fafc;
+      font-weight: 600;
+    }
+    .line-num {
+      width: 38px;
+      min-width: 38px;
+      text-align: right;
+      padding-right: 12px;
+      color: #475569;
+      user-select: none;
+      font-size: 11.5px;
+    }
+    .line-code {
+      white-space: pre;
+      flex: 1;
+    }
+
+    /* Syntax tokens */
+    .tok-kw { color: #c084fc; font-weight: 500; }
+    .tok-fn { color: #38bdf8; }
+    .tok-str { color: #86efac; }
+    .tok-num { color: #fbbf24; }
+    .tok-com { color: #64748b; font-style: italic; }
+    .tok-dec { color: #f472b6; font-weight: 500; }
+    .tok-cls { color: #fcd34d; }
+    .tok-op { color: #94a3b8; }
+
+    /* SVG Diagram animations */
+    .flow-node {
+      cursor: pointer;
+      transition: filter 0.2s ease, opacity 0.2s ease;
+    }
+    .flow-node rect.node-box,
+    .flow-node polygon.node-box {
+      transition: stroke 0.2s ease, stroke-width 0.2s ease, fill 0.2s ease;
+    }
+    .flow-node:hover rect.node-box,
+    .flow-node:hover polygon.node-box {
+      filter: brightness(1.18);
+    }
+    .flow-node.dimmed {
+      opacity: 0.42;
+    }
+    .flow-node.active-node {
+      opacity: 1;
+      filter: drop-shadow(0 0 12px rgba(56, 189, 248, 0.55));
+    }
+    .flow-edge {
+      transition: stroke 0.25s ease, stroke-width 0.25s ease, opacity 0.25s ease;
+    }
+    .flow-edge.active-edge {
+      stroke-dasharray: 8 4;
+      animation: dashFlow 0.85s linear infinite;
+      opacity: 1 !important;
+    }
+    @keyframes dashFlow {
+      to { stroke-dashoffset: -24; }
+    }
+    @keyframes pulseRing {
+      0%, 100% { opacity: 0.9; }
+      50% { opacity: 0.35; }
+    }
+    .active-pulse {
+      animation: pulseRing 1.6s ease-in-out infinite;
+    }
+
+    /* Stage pill dot */
+    .stage-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 9999px;
+      display: inline-block;
+      flex-shrink: 0;
+    }
+  </style>
+</head>
+<body class="app-shell bg-[#0b1120] text-slate-200">
+
+  <!-- SINGLE ULTRA-SLIM TOP TOOLBAR (40px) -->
+  <header class="shrink-0 h-10 border-b border-slate-800 bg-[#0f172a] px-2.5 flex items-center justify-between gap-2">
+    <!-- Left: File Switcher Tabs -->
+    <div class="flex items-center gap-1 shrink-0">
+      <button id="tab-agent" type="button"
+        class="file-tab flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-md bg-sky-500/20 text-sky-300 border border-sky-500/35">
+        <i data-lucide="file-code-2" class="w-3.5 h-3.5 text-sky-400"></i>
+        agent.py
+      </button>
+      <button id="tab-tools" type="button"
+        class="file-tab flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-md text-slate-400 hover:text-slate-200 border border-transparent">
+        <i data-lucide="wrench" class="w-3.5 h-3.5 text-amber-400"></i>
+        tools.py
+      </button>
+      <span id="active-line-range" class="hidden md:inline-block ml-1.5 text-[11px] font-mono-code text-slate-400"></span>
+    </div>
+
+    <!-- Center: Compact Simulation Controls -->
+    <div class="flex items-center gap-1.5 shrink-0">
+      <div class="hidden sm:flex items-center bg-slate-950/70 border border-slate-800 rounded-md p-0.5 text-[11px]">
+        <button id="btn-scenario-normal" type="button"
+          class="px-2 py-0.5 rounded font-medium bg-sky-500/20 text-sky-300">多轮调用</button>
+        <button id="btn-scenario-error" type="button"
+          class="px-2 py-0.5 rounded font-medium text-slate-400 hover:text-slate-200">异常自愈</button>
+      </div>
+      <div class="flex items-center gap-0.5 bg-slate-950/70 border border-slate-800 rounded-md px-1 py-0.5">
+        <button id="btn-prev" type="button" title="上一步"
+          class="p-1 rounded hover:bg-slate-800 text-slate-300 hover:text-white disabled:opacity-35">
+          <i data-lucide="skip-back" class="w-3.5 h-3.5"></i>
+        </button>
+        <button id="btn-play" type="button"
+          class="flex items-center gap-1 px-2 py-0.5 rounded bg-sky-600 hover:bg-sky-500 text-white text-[11px] font-medium">
+          <i data-lucide="play" class="w-3 h-3" id="icon-play"></i>
+          <span id="label-play">演示</span>
+        </button>
+        <button id="btn-next" type="button" title="下一步"
+          class="p-1 rounded hover:bg-slate-800 text-slate-300 hover:text-white disabled:opacity-35">
+          <i data-lucide="skip-forward" class="w-3.5 h-3.5"></i>
+        </button>
+        <button id="btn-reset" type="button" title="重置"
+          class="p-1 rounded hover:bg-slate-800 text-slate-400 hover:text-white">
+          <i data-lucide="rotate-ccw" class="w-3 h-3"></i>
+        </button>
+      </div>
+      <span id="step-summary" class="hidden xl:inline-block max-w-[240px] truncate text-[11px] text-sky-300 font-medium"></span>
+    </div>
+
+    <!-- Right: Diagram Zoom & View Controls -->
+    <div class="flex items-center gap-1.5 shrink-0">
+      <div class="flex items-center bg-slate-950/70 border border-slate-800 rounded-md px-0.5 py-0.5">
+        <button id="btn-zoom-out" type="button" title="缩小"
+          class="px-1.5 text-xs text-slate-300 hover:text-white hover:bg-slate-800 rounded">−</button>
+        <span id="zoom-label" class="px-1 text-[11px] font-mono-code text-slate-300 select-none">100%</span>
+        <button id="btn-zoom-in" type="button" title="放大"
+          class="px-1.5 text-xs text-slate-300 hover:text-white hover:bg-slate-800 rounded">+</button>
+      </div>
+      <button id="btn-expand-diagram" type="button"
+        class="flex items-center gap-1 text-[11px] px-2 py-1 rounded-md bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border border-sky-500/30">
+        <i data-lucide="maximize-2" class="w-3 h-3"></i>
+        <span id="label-expand-diagram">收起解析</span>
+      </button>
+      <button id="btn-show-all" type="button" title="取消高亮聚焦"
+        class="text-[11px] px-2 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300">
+        全景
+      </button>
+    </div>
+  </header>
+
+  <!-- MAIN WORKSPACE: Pure Edge-to-Edge Code (Left) + Flowchart & Compact Inspector (Right) -->
+  <main class="workspace-grid">
+
+    <!-- LEFT PANE: Full-Height Code Only -->
+    <section class="left-pane border-r border-slate-800 bg-[#0d1424]">
+      <div id="code-scroll-area" class="flex-1 min-h-0 overflow-y-auto overflow-x-auto py-1.5 font-mono-code select-text">
+        <div id="code-lines-container"></div>
+      </div>
+    </section>
+
+    <!-- RIGHT PANE: Full-Area Flowchart + Compact Collapsible Inspector -->
+    <section class="right-pane bg-[#080d1a]">
+      <div class="diagram-section relative border-b border-slate-800 bg-[#080d1a] p-1.5">
+        <div class="diagram-canvas-wrap">
+          <svg id="agent-flow-svg" viewBox="0 0 900 500" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <marker id="arrow-slate" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 1 L 10 5 L 0 9 z" fill="#64748b" />
+              </marker>
+              <marker id="arrow-sky" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 1 L 10 5 L 0 9 z" fill="#38bdf8" />
+              </marker>
+            </defs>
+
+            <!-- Background Swimlane Containers -->
+            <rect x="8" y="8" width="218" height="484" rx="14" fill="#111827" fill-opacity="0.78" stroke="#581c87" stroke-width="1.4" stroke-dasharray="5 4" />
+            <text x="20" y="31" fill="#d8b4fe" font-size="13.5" font-weight="700">阶段 0 · 启动与注册</text>
+
+            <rect x="238" y="8" width="424" height="484" rx="14" fill="#0f172a" fill-opacity="0.86" stroke="#1d4ed8" stroke-width="1.4" stroke-dasharray="5 4" />
+            <text x="250" y="31" fill="#60a5fa" font-size="13.5" font-weight="700">阶段 1~3 · ReAct 核心循环 (最多 20 圈)</text>
+
+            <rect x="674" y="8" width="218" height="484" rx="14" fill="#1c1917" fill-opacity="0.72" stroke="#92400e" stroke-width="1.4" stroke-dasharray="5 4" />
+            <text x="686" y="31" fill="#fbbf24" font-size="13.5" font-weight="700">阶段 4 · 工具执行层</text>
+
+            <!-- ================= EDGES (DATA FLOW) ================= -->
+            <path id="edge-reg-init" class="flow-edge" d="M 117 158 L 117 190" stroke="#64748b" stroke-width="2.2" fill="none" marker-end="url(#arrow-slate)" />
+            <path id="edge-init-repl" class="flow-edge" d="M 117 302 L 117 336" stroke="#64748b" stroke-width="2.2" fill="none" marker-end="url(#arrow-slate)" />
+            <path id="edge-repl-user" class="flow-edge" d="M 214 394 L 230 394 L 230 112 L 250 112" stroke="#64748b" stroke-width="2.2" fill="none" marker-end="url(#arrow-slate)" />
+            <path id="edge-user-llm" class="flow-edge" d="M 430 112 L 456 112" stroke="#64748b" stroke-width="2.2" fill="none" marker-end="url(#arrow-slate)" />
+
+            <!-- get_schemas -> llm_call -->
+            <path id="edge-schema-llm" class="flow-edge" d="M 214 92 L 230 92 L 230 50 L 554 50 L 554 64" stroke="#64748b" stroke-width="1.8" stroke-dasharray="4 3" fill="none" marker-end="url(#arrow-slate)" />
+            <rect x="330" y="39" width="152" height="20" rx="5" fill="#0f172a" stroke="#334155" stroke-width="0.8" />
+            <text x="406" y="53" text-anchor="middle" fill="#e2e8f0" font-size="11.5" font-weight="600" font-family="JetBrains Mono, monospace">tools=get_schemas()</text>
+
+            <!-- llm_call -> check_tools -->
+            <path id="edge-llm-check" class="flow-edge" d="M 554 158 L 554 184" stroke="#64748b" stroke-width="2.2" fill="none" marker-end="url(#arrow-slate)" />
+
+            <!-- check_tools -> final_answer -->
+            <path id="edge-check-final" class="flow-edge" d="M 468 228 L 342 228 L 342 272" stroke="#64748b" stroke-width="2.2" fill="none" marker-end="url(#arrow-slate)" />
+            <rect x="348" y="206" width="112" height="20" rx="5" fill="#064e3b" fill-opacity="0.9" />
+            <text x="404" y="220" text-anchor="middle" fill="#6ee7b7" font-size="11.5" font-weight="700">无 tool_calls</text>
+
+            <!-- check_tools -> tool_loop -->
+            <path id="edge-check-loop" class="flow-edge" d="M 554 270 L 554 306" stroke="#64748b" stroke-width="2.2" fill="none" marker-end="url(#arrow-slate)" />
+            <rect x="562" y="276" width="90" height="20" rx="5" fill="#451a03" fill-opacity="0.95" />
+            <text x="607" y="290" text-anchor="middle" fill="#fcd34d" font-size="11.5" font-weight="700">有 tool_calls</text>
+
+            <!-- tool_loop -> execute_tool -->
+            <path id="edge-loop-exec" class="flow-edge" d="M 648 354 L 666 354 L 666 126 L 684 126" stroke="#64748b" stroke-width="2.2" fill="none" marker-end="url(#arrow-slate)" />
+
+            <!-- execute_tool -> concrete_tools -->
+            <path id="edge-exec-concrete" class="flow-edge" d="M 783 188 L 783 216" stroke="#64748b" stroke-width="2.2" fill="none" marker-end="url(#arrow-slate)" />
+
+            <!-- concrete_tools -> tool_loop return -->
+            <path id="edge-concrete-back" class="flow-edge" d="M 783 418 L 783 462 L 554 462 L 554 412" stroke="#64748b" stroke-width="2.2" fill="none" marker-end="url(#arrow-slate)" />
+            <rect x="566" y="450" width="210" height="22" rx="6" fill="#080d1a" stroke="#92400e" stroke-width="0.9" />
+            <text x="671" y="465" text-anchor="middle" fill="#fbbf24" font-size="11.5" font-weight="600">返回字符串 (≤8000字 / 捕获异常)</text>
+
+            <!-- tool_loop -> llm_call (ReAct Feedback Loop) -->
+            <path id="edge-loop-llm" class="flow-edge" d="M 460 354 L 444 354 L 444 172 L 496 172 L 496 160" stroke="#64748b" stroke-width="2.4" fill="none" marker-end="url(#arrow-slate)" />
+            <rect x="330" y="366" width="122" height="22" rx="5" fill="#1e1b4b" stroke="#4f46e5" stroke-width="0.8" />
+            <text x="391" y="381" text-anchor="middle" fill="#c7d2fe" font-size="11" font-weight="700">追加 tool · 下一轮 ↻</text>
+
+            <!-- max_steps fallback -->
+            <path id="edge-max-steps" class="flow-edge" d="M 342 362 L 342 400" stroke="#64748b" stroke-width="1.8" stroke-dasharray="4 3" fill="none" marker-end="url(#arrow-slate)" />
+
+            <!-- ================= NODES ================= -->
+
+            <!-- Node 1: tool_registry -->
+            <g class="flow-node" data-node="tool_registry" transform="translate(20, 48)">
+              <rect class="node-box" width="194" height="110" rx="11" fill="#1e1b4b" stroke="#a855f7" stroke-width="2" />
+              <text x="14" y="26" fill="#d8b4fe" font-size="12" font-weight="600">tools.py · import</text>
+              <text x="14" y="54" fill="#ffffff" font-size="16" font-weight="700">@tool 装饰器注册</text>
+              <text x="14" y="78" fill="#e2e8f0" font-size="12.5">自动填充 TOOLS 字典</text>
+              <text x="14" y="97" fill="#c4b5fd" font-size="12">生成 JSON Schema</text>
+            </g>
+
+            <!-- Node 2: client_init -->
+            <g class="flow-node" data-node="client_init" transform="translate(20, 192)">
+              <rect class="node-box" width="194" height="110" rx="11" fill="#172554" stroke="#818cf8" stroke-width="2" />
+              <text x="14" y="26" fill="#a5b4fc" font-size="12" font-weight="600">agent.py · 全局配置</text>
+              <text x="14" y="54" fill="#ffffff" font-size="16" font-weight="700">客户端与系统设定</text>
+              <text x="14" y="78" fill="#e2e8f0" font-size="12.5">OpenAI (DeepSeek)</text>
+              <text x="14" y="97" fill="#93c5fd" font-size="12">MAX_STEPS=20 · SYSTEM</text>
+            </g>
+
+            <!-- Node 3: repl_entry -->
+            <g class="flow-node" data-node="repl_entry" transform="translate(20, 338)">
+              <rect class="node-box" width="194" height="114" rx="11" fill="#0c4a6e" stroke="#38bdf8" stroke-width="2" />
+              <text x="14" y="26" fill="#7dd3fc" font-size="12" font-weight="600">agent.py · __main__</text>
+              <text x="14" y="54" fill="#ffffff" font-size="16" font-weight="700">REPL 交互主循环</text>
+              <text x="14" y="78" fill="#e2e8f0" font-size="12.5">初始化 messages=[sys]</text>
+              <text x="14" y="99" fill="#bae6fd" font-size="12">保持多轮对话记忆</text>
+            </g>
+
+            <!-- Node 4: append_user -->
+            <g class="flow-node" data-node="append_user" transform="translate(252, 68)">
+              <rect class="node-box" width="178" height="88" rx="11" fill="#0f2942" stroke="#38bdf8" stroke-width="2" />
+              <text x="14" y="25" fill="#7dd3fc" font-size="12" font-weight="600">agent.py · run()</text>
+              <text x="14" y="52" fill="#ffffff" font-size="16" font-weight="700">写入用户问题</text>
+              <text x="14" y="74" fill="#cbd5e1" font-size="12">messages.append(user)</text>
+            </g>
+
+            <!-- Node 5: llm_call -->
+            <g class="flow-node" data-node="llm_call" transform="translate(458, 66)">
+              <rect class="node-box" width="192" height="92" rx="11" fill="#1e1b4b" stroke="#6366f1" stroke-width="2.2" />
+              <text x="14" y="25" fill="#a5b4fc" font-size="12" font-weight="600">核心大脑 · API 请求</text>
+              <text x="14" y="53" fill="#ffffff" font-size="16.5" font-weight="700">LLM 推理决策</text>
+              <text x="14" y="76" fill="#e2e8f0" font-size="12">发 messages+tools · 存回复</text>
+            </g>
+
+            <!-- Node 6: check_tools (Decision Diamond) -->
+            <g class="flow-node" data-node="check_tools" transform="translate(468, 186)">
+              <polygon class="node-box" points="86,0 172,42 86,84 0,42" fill="#1e293b" stroke="#38bdf8" stroke-width="2.2" />
+              <text x="86" y="38" text-anchor="middle" fill="#ffffff" font-size="15" font-weight="700">需要调工具?</text>
+              <text x="86" y="57" text-anchor="middle" fill="#cbd5e1" font-size="12">msg.tool_calls</text>
+            </g>
+
+            <!-- Node 7: final_answer -->
+            <g class="flow-node" data-node="final_answer" transform="translate(252, 274)">
+              <rect class="node-box" width="178" height="88" rx="11" fill="#064e3b" stroke="#10b981" stroke-width="2.2" />
+              <text x="14" y="25" fill="#6ee7b7" font-size="12" font-weight="600">循环出口 · 完成</text>
+              <text x="14" y="52" fill="#ffffff" font-size="16" font-weight="700">返回最终答案</text>
+              <text x="14" y="74" fill="#d1fae5" font-size="12">return msg.content</text>
+            </g>
+
+            <!-- Node 8: max_steps -->
+            <g class="flow-node" data-node="max_steps" transform="translate(252, 402)">
+              <rect class="node-box" width="178" height="68" rx="10" fill="#4c0519" stroke="#f43f5e" stroke-width="1.8" />
+              <text x="14" y="25" fill="#fda4af" font-size="12" font-weight="600">熔断兜底机制</text>
+              <text x="14" y="51" fill="#ffffff" font-size="15" font-weight="700">达 20 步强制停止</text>
+            </g>
+
+            <!-- Node 9: tool_loop -->
+            <g class="flow-node" data-node="tool_loop" transform="translate(460, 308)">
+              <rect class="node-box" width="188" height="102" rx="11" fill="#451a03" stroke="#f59e0b" stroke-width="2.2" />
+              <text x="14" y="25" fill="#fcd34d" font-size="12" font-weight="600">agent.py · 调度器</text>
+              <text x="14" y="52" fill="#ffffff" font-size="16" font-weight="700">解析参数 &amp; 回填</text>
+              <text x="14" y="74" fill="#fde68a" font-size="12">json.loads 逐个执行</text>
+              <text x="14" y="92" fill="#fdba74" font-size="12">匹配 tool_call_id</text>
+            </g>
+
+            <!-- Node 10: execute_tool -->
+            <g class="flow-node" data-node="execute_tool" transform="translate(686, 66)">
+              <rect class="node-box" width="194" height="122" rx="11" fill="#431407" stroke="#fb923c" stroke-width="2.2" />
+              <text x="14" y="25" fill="#fdba74" font-size="12" font-weight="600">tools.py · 安全网关</text>
+              <text x="14" y="52" fill="#ffffff" font-size="15.5" font-weight="700">execute() 安全执行</text>
+              <text x="14" y="74" fill="#fed7aa" font-size="12">1. 校验工具名是否存在</text>
+              <text x="14" y="93" fill="#fed7aa" font-size="12">2. try/except 永不崩溃</text>
+              <text x="14" y="112" fill="#fed7aa" font-size="12">3. 超 8000 字自动截断</text>
+            </g>
+
+            <!-- Node 11: concrete_tools -->
+            <g class="flow-node" data-node="concrete_tools" transform="translate(686, 218)">
+              <rect class="node-box" width="194" height="200" rx="11" fill="#1c1917" stroke="#d97706" stroke-width="2" />
+              <text x="14" y="26" fill="#fbbf24" font-size="13" font-weight="700">5 个本地原子能力</text>
+              <g transform="translate(12, 38)">
+                <rect width="170" height="27" rx="6" fill="#292524" />
+                <text x="10" y="18" fill="#f5f5f4" font-size="12.5" font-family="JetBrains Mono, monospace">list_dir(path)</text>
+              </g>
+              <g transform="translate(12, 70)">
+                <rect width="170" height="27" rx="6" fill="#292524" />
+                <text x="10" y="18" fill="#f5f5f4" font-size="12.5" font-family="JetBrains Mono, monospace">read_file(path)</text>
+              </g>
+              <g transform="translate(12, 102)">
+                <rect width="170" height="27" rx="6" fill="#292524" />
+                <text x="10" y="18" fill="#f5f5f4" font-size="12.5" font-family="JetBrains Mono, monospace">write_file(p, c)</text>
+              </g>
+              <g transform="translate(12, 134)">
+                <rect width="170" height="27" rx="6" fill="#292524" />
+                <text x="10" y="18" fill="#f5f5f4" font-size="12.5" font-family="JetBrains Mono, monospace">run_shell(cmd)</text>
+              </g>
+              <g transform="translate(12, 166)">
+                <rect width="170" height="27" rx="6" fill="#292524" />
+                <text x="10" y="18" fill="#f5f5f4" font-size="12.5" font-family="JetBrains Mono, monospace">fetch_url(url)</text>
+              </g>
+            </g>
+          </svg>
+        </div>
+      </div>
+
+      <!-- BOTTOM HALF (44% height, independent scroll): Detailed Inspector Tabs -->
+      <div class="inspector-section bg-[#0f172a]/50">
+        <!-- Slim Inspector Tab Bar (34px) -->
+        <div class="flex items-center justify-between border-b border-slate-800 bg-[#0f172a] px-3 h-[34px] shrink-0 gap-2">
+          <div class="flex items-center gap-1 h-full">
+            <button id="insp-tab-explain" type="button"
+              class="insp-tab h-full px-2.5 text-xs font-semibold border-b-2 border-sky-400 text-sky-300 flex items-center gap-1">
+              <i data-lucide="book-open" class="w-3.5 h-3.5"></i>
+              原理解析
+            </button>
+            <button id="insp-tab-messages" type="button"
+              class="insp-tab h-full px-2.5 text-xs font-semibold border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center gap-1">
+              <i data-lucide="layers" class="w-3.5 h-3.5"></i>
+              messages[]
+              <span id="msg-count-badge" class="px-1.5 rounded-full text-[10px] bg-slate-800 text-sky-300">1</span>
+            </button>
+            <button id="insp-tab-registry" type="button"
+              class="insp-tab h-full px-2.5 text-xs font-semibold border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center gap-1">
+              <i data-lucide="box" class="w-3.5 h-3.5"></i>
+              TOOLS
+            </button>
+          </div>
+          <span id="diagram-active-badge" class="truncate text-[11px] px-2 py-0.5 rounded-full bg-sky-500/15 text-sky-300 border border-sky-500/30 font-medium"></span>
+        </div>
+
+        <!-- Inspector Scroll Content -->
+        <div id="inspector-scroll-area" class="flex-1 min-h-0 overflow-y-auto p-3.5">
+          <!-- Tab 1: Deep Explanation -->
+          <div id="panel-explain" class="space-y-3.5"></div>
+
+          <!-- Tab 2: Live messages[] Memory -->
+          <div id="panel-messages" class="hidden space-y-2.5"></div>
+
+          <!-- Tab 3: TOOLS Registry -->
+          <div id="panel-registry" class="hidden space-y-3"></div>
+        </div>
+      </div>
+
+    </section>
+  </main>
+
+  <script>
+    // =========================================================================
+    // 1. EXACT USER SOURCE CODE (agent.py & tools.py)
+    // =========================================================================
+    const FILES = {
+      agent: {
+        name: 'agent.py',
+        lines: [
+          'import os',
+          'import json',
+          '',
+          '',
+          'from openai import OpenAI',
+          '',
+          'from tools import get_schemas,execute',
+          '',
+          'client = OpenAI(',
+          '    api_key=os.environ["DEEPSEEK_API_KEY"],',
+          '    base_url=os.environ.get("BASE_URL", "https://api.deepseek.com"),',
+          ')',
+          '',
+          'MODEL = os.environ.get("MODEL","deepseek-flash")',
+          'MAX_STEPS = 20 # 防止死循环：Agent 最多转 20 圈',
+          '',
+          'SYSTEM = (',
+          '    "你是一个能使用工具的助手，在用户当前目录下完成任务。"',
+          '    "必要时调用工具，完成后用简洁的语言汇报结果。"',
+          '    )',
+          '',
+          '',
+          'def run(user_input,messages):',
+          '    messages.append({"role":"user", "content": user_input})',
+          '',
+          '    for _ in range (MAX_STEPS):',
+          '        resp = client.chat.completions.create(model=MODEL,messages=messages, tools=get_schemas())',
+          '        msg = resp.choices[0].message',
+          '        messages.append(msg.model_dump(exclude_none=True))',
+          '',
+          '        #没有工具调用，说明模型给出了最终答案',
+          '        if not msg.tool_calls:',
+          '            return msg.content or ""',
+          '',
+          '        #模型可能一轮调用请求多个工具，每个都必须回应',
+          '        for call in msg.tool_calls:',
+          '            name = call.function.name',
+          '            try:',
+          '                args = json.loads(call.function.arguments or "{}")',
+          '            except json.JSONDecodeError:',
+          '                result = "Error: 参数不是合法的 JSON"',
+          '            else:',
+          '                print(f"🔧{name}({call.function.arguments[:80]})")',
+          '                result = execute(name, args)',
+          '            messages.append({"role": "tool", "tool_call_id": call.id, "content": result})',
+          '',
+          '    return "(达到最大步数，已停止)"',
+          '',
+          'if __name__=="__main__":',
+          '    messages = [{"role": "system", "content": SYSTEM}]',
+          '    while True:',
+          '        q = input("你> ").strip()',
+          '        if q in ("exit", "quit"):',
+          '            break',
+          '        print("\\n" + run(q, messages) + "\\n")'
+        ]
+      },
+      tools: {
+        name: 'tools.py',
+        lines: [
+          '#tools.py',
+          '',
+          'import subprocess',
+          'import urllib.request',
+          'from pathlib import Path',
+          '',
+          'MAX_OUTPUT= 8000  #工具返回给模型的最大字符数',
+          'TOOLS = {}        #注册表： name -> {"schema": ..., "func": ...}',
+          '',
+          '',
+          'def tool(name,description,parameters):',
+          '    """装饰器：把一个函数注册为工具"""',
+          '    def decorator(func):',
+          '        TOOLS[name] = {',
+          '            "schema": {"type": "function", "function": {',
+          '                "name": name, ',
+          '                "description": description,',
+          '                "parameters": parameters',
+          '            }},',
+          '            "func": func',
+          '        }',
+          '        return func',
+          '    return decorator',
+          '',
+          'def get_schemas():',
+          '    """返回给模型看的全部工具说明书"""',
+          '    return [t["schema"] for t in TOOLS.values()]',
+          '',
+          '',
+          'def _params(**props):',
+          '    """简写：所有参数都是必填的字符串"""',
+          '    return {',
+          '        "type": "object",',
+          '        "properties": {k: {"type": "string", "description": v} ',
+          '                       for k, v in props.items()},',
+          '                       "required": list(props)}',
+          '',
+          '',
+          '@tool("list_dir","列出某个目录下的文件和子目录",',
+          '      _params(path="目录路径，当前目录写。"))',
+          'def list_dir(path="."):',
+          '    p = Path(path)',
+          '    return "\\n".join(sorted(x.name + ("/" if x.is_dir() else "") ',
+          '                            for x in p.iterdir())) or "(空目录)"',
+          '',
+          '',
+          '@tool("read_file","读取一个文本文件的内容",',
+          '      _params(path="文件路径"))',
+          'def read_file(path):',
+          '    return Path(path).read_text(encoding="utf-8")',
+          '',
+          '',
+          '@tool("write_file","把内容写进文件，已存在则覆盖，目录不存在会自动创建。",',
+          '      _params(path="文件路径", content="要写入的内容"))',
+          'def write_file(path, content):',
+          '    p = Path(path)',
+          '    p.parent.mkdir(parents=True,exist_ok=True)',
+          '    p.write_text(content, encoding="utf-8")',
+          '    return f"已写入{path} ({len(content)}字节)"',
+          '',
+          '',
+          '@tool("run_shell","在当前目录执行一条shell命令，返回退出码,标准输出和错误输出。",',
+          '      _params(command="shell要执行的命令"))',
+          'def run_shell(command):',
+          '    p = subprocess.run(command, shell=True, ',
+          '                       capture_output=True,text=True,timeout=30)',
+          '    return f"[exit {p.returncode}]\\n{p.stdout}{p.stderr}"',
+          '',
+          '',
+          '@tool("fetch_url","抓取一个网页或接口的文本内容。url必须以http或https开头。",',
+          '      _params(url="网页或接口的url"))',
+          'def fetch_url(url):',
+          '    req = urllib.request.Request(url, headers={"User-Agent": "Makima-agent"})',
+          '    with urllib.request.urlopen(req, timeout=15) as resp:',
+          '        return resp.read().decode("utf-8", errors="replace")',
+          '',
+          '',
+          '',
+          'def execute(name, args):',
+          '    """执行工具，永远返回字符串，永远不抛异常"""',
+          '    if name not in TOOLS:',
+          '        return  f"Error: 不存在工具 \'{name}\', 可用工具：{\',\'.join(TOOLS)}"',
+          '    try:',
+          '        result = str(TOOLS[name]["func"](**args))',
+          '',
+          '    except Exception as e:',
+          '        return f"Error: {type(e).__name__}: {e}"',
+          '    if len(result) > MAX_OUTPUT:',
+          '        result = result[:MAX_OUTPUT] + f"\\n...(已截断，共{len(result)} 字符)"',
+          '    return result'
+        ]
+      }
+    };
+
+    // =========================================================================
+    // 2. KNOWLEDGE GRAPH: NODES <-> CODE LINES <-> EXPLANATIONS
+    // =========================================================================
+    const NODES = {
+      tool_registry: {
+        id: 'tool_registry',
+        title: '@tool 装饰器与自动注册机制',
+        stage: '阶段 0 · 启动与工具注册',
+        accent: '#a855f7',
+        badgeClass: 'bg-purple-500/15 text-purple-300 border-purple-500/30',
+        primaryFile: 'tools',
+        codeRanges: {
+          agent: [[7, 7]],
+          tools: [[1, 36]]
+        },
+        activeEdges: ['edge-reg-init', 'edge-schema-llm'],
+        summary: '当 agent.py 执行 from tools import get_schemas, execute 时，Python 会立即执行 tools.py 顶层代码。所有带 @tool(...) 装饰器的函数会在程序启动瞬间自动注册到全局 TOOLS 字典中。',
+        whyItMatters: [
+          '解耦设计（开闭原则）：以后你想新增第 6 个工具（比如发邮件或查数据库），只需在 tools.py 里写一个函数并加上 @tool 装饰器，agent.py 一行代码都不用改。',
+          '双轨存储：TOOLS[name] 同时保存了给大模型看的 schema（工具说明书）和给 Python 执行的 func（真实函数引用）。',
+          '_params(**props) 是极佳的语法糖，把冗长的 JSON Schema（type/properties/required）压缩成一行可读的键值对。'
+        ],
+        io: {
+          input: 'Python 函数定义 + 名称/描述/参数说明',
+          output: '全局字典 TOOLS = { name: { "schema": OpenAI格式JSON, "func": 函数对象 } }'
+        },
+        pitfall: '注意 get_schemas() 返回的描述文案（description）就是给大模型看的“Prompt”。描述写得越清晰（例如写明“当前目录写 .”、“url必须以http或https开头”），模型调用参数就越准确！'
+      },
+      client_init: {
+        id: 'client_init',
+        title: 'API 客户端、模型与系统提示词初始化',
+        stage: '阶段 0 · 全局配置',
+        accent: '#818cf8',
+        badgeClass: 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30',
+        primaryFile: 'agent',
+        codeRanges: {
+          agent: [[1, 20]],
+          tools: []
+        },
+        activeEdges: ['edge-reg-init', 'edge-init-repl'],
+        summary: '初始化兼容 OpenAI 协议的 DeepSeek 客户端，配置模型名称、最大循环步数 MAX_STEPS=20，以及定义 Agent 行为边界的 SYSTEM 系统提示词。',
+        whyItMatters: [
+          'OpenAI SDK 通用性：DeepSeek 等主流模型都兼容 OpenAI 接口标准，只需改 base_url 和 api_key 即可无缝切换模型厂商。',
+          '安全读取密钥：通过 os.environ["DEEPSEEK_API_KEY"] 从环境变量获取 Key，避免把私密 API Key 硬编码提交到代码仓库。',
+          'MAX_STEPS = 20 熔断器：Agent 是自主循环的，如果模型陷入“反复调错工具”的死循环，这个上限能帮你止损，防止 Token 费用爆炸。'
+        ],
+        io: {
+          input: '环境变量 DEEPSEEK_API_KEY / BASE_URL / MODEL',
+          output: '可复用的 client 实例、MAX_STEPS 常量、SYSTEM 提示词'
+        },
+        pitfall: 'os.environ["DEEPSEEK_API_KEY"] 如果环境变量没设置会直接报 KeyError 提前失败（fail-fast）；而 BASE_URL 和 MODEL 用 .get() 提供了默认值，配置更灵活。'
+      },
+      repl_entry: {
+        id: 'repl_entry',
+        title: 'REPL 命令行交互主循环与多轮记忆',
+        stage: '阶段 1 · 对话入口',
+        accent: '#38bdf8',
+        badgeClass: 'bg-sky-500/15 text-sky-300 border-sky-500/30',
+        primaryFile: 'agent',
+        codeRanges: {
+          agent: [[48, 54]],
+          tools: []
+        },
+        activeEdges: ['edge-init-repl', 'edge-repl-user'],
+        summary: '程序入口：在 while True 循环外初始化 messages = [{"role": "system", "content": SYSTEM}]，随后持续等待用户输入，每次调用 run(q, messages) 执行一轮完整的 Agent 任务。',
+        whyItMatters: [
+          '多轮对话记忆的核心秘密：messages 列表定义在 while True 外部！由于 Python 列表是可变对象（按引用传递），每次 run(q, messages) 都会往同一个列表追加历史记录，所以 Agent 能记住你上一句说过的话。',
+          '优雅退出：检测 exit 或 quit 跳出循环，避免只能靠 Ctrl+C 强行中断。'
+        ],
+        io: {
+          input: '用户在终端输入的指令 q',
+          output: '打印 run(q, messages) 返回的最终回答字符串'
+        },
+        pitfall: '大模型本身是“无状态”的（每次 API 请求都是全新失忆的）。所谓“Agent 有记忆”，本质上就是每次都把越来越长的 messages 列表完整重新发给大模型！'
+      },
+      append_user: {
+        id: 'append_user',
+        title: '接收用户指令并写入上下文',
+        stage: '阶段 2 · 任务启动',
+        accent: '#38bdf8',
+        badgeClass: 'bg-sky-500/15 text-sky-300 border-sky-500/30',
+        primaryFile: 'agent',
+        codeRanges: {
+          agent: [[23, 24]],
+          tools: []
+        },
+        activeEdges: ['edge-repl-user', 'edge-user-llm'],
+        summary: 'run() 函数启动的第一件事，是将用户的新问题封装为 {"role": "user", "content": user_input} 并追加到 messages 末尾。',
+        whyItMatters: [
+          '标准的 ChatML 对话格式：所有消息都有明确的 role（system / user / assistant / tool），大模型靠 role 区分“谁说了什么”。',
+          '上下文连续性：此时 messages 里已经包含：[system 规则, 历史对话..., 本次 user 问题]。'
+        ],
+        io: {
+          input: 'user_input (str), messages (list)',
+          output: 'messages 原地新增一条 role="user" 的记录'
+        },
+        pitfall: '不要在 run() 内部重新赋值 messages = [...]，否则会破坏外部引用的多轮对话记忆。用 .append() 原地修改才是正确姿势。'
+      },
+      llm_call: {
+        id: 'llm_call',
+        title: 'LLM 推理决策与 Assistant 消息落盘',
+        stage: '阶段 2 · ReAct 大脑思考',
+        accent: '#6366f1',
+        badgeClass: 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30',
+        primaryFile: 'agent',
+        codeRanges: {
+          agent: [[26, 29]],
+          tools: [[25, 27]]
+        },
+        activeEdges: ['edge-user-llm', 'edge-schema-llm', 'edge-llm-check'],
+        summary: '进入 for _ in range(MAX_STEPS) 循环，把完整历史 messages 和全部工具说明书 tools=get_schemas() 发给大模型；拿到回复 msg 后，立刻用 model_dump(exclude_none=True) 存入 messages。',
+        whyItMatters: [
+          '核心驱动力：大模型看到用户需求 + 工具清单后，会自主推理：是直接回答？还是先调用一个或多个工具获取信息？',
+          '极其关键的一行：messages.append(msg.model_dump(exclude_none=True))。OpenAI/DeepSeek 协议严格要求：在后面追加 role="tool" 之前，messages 里必须先有一条包含 tool_calls 的 assistant 消息！',
+          '为什么加 exclude_none=True？Pydantic 对象转字典时，没用到的字段（如 refusal: None、audio: None）会被剔除，防止部分兼容 API 校验报错。'
+        ],
+        io: {
+          input: 'messages (全量对话历史) + tools (5个工具的 JSON Schema)',
+          output: 'msg 对象（可能包含 content 文本，或包含 tool_calls 列表）'
+        },
+        pitfall: '新手最常犯的错误是忘记把带 tool_calls 的 assistant 消息 append 进 messages，导致下一轮请求直接报错 400 Bad Request（孤立的 tool 消息）。你这里写得非常规范！'
+      },
+      check_tools: {
+        id: 'check_tools',
+        title: '分支判断：是否需要调用工具？',
+        stage: '阶段 2 · ReAct 路由判断',
+        accent: '#38bdf8',
+        badgeClass: 'bg-sky-500/15 text-sky-300 border-sky-500/30',
+        primaryFile: 'agent',
+        codeRanges: {
+          agent: [[31, 33]],
+          tools: []
+        },
+        activeEdges: ['edge-llm-check', 'edge-check-final', 'edge-check-loop'],
+        summary: '检查 msg.tool_calls 是否为空。这是整个 Agent 循环唯一的正常出口：没有工具调用说明模型认为信息已足够，可以直接向用户交卷。',
+        whyItMatters: [
+          '控制权反转：传统代码由程序员写死 if/else 步骤；而 Agent 由大模型根据当前观察到的信息，动态决定“继续干活”还是“结束汇报”。',
+          '这就是 ReAct（Reason + Act）范式的精髓：思考 -> 行动 -> 观察 -> 再思考 -> 直到任务完成。'
+        ],
+        io: {
+          input: 'msg.tool_calls (None / 空列表 / ToolCall 对象列表)',
+          output: '分支 A：return 最终文本；分支 B：进入工具执行循环'
+        },
+        pitfall: 'return msg.content or "" 用了空字符串兜底，防止极端情况下模型返回 content=None 导致外层 print("\\n" + run(...) + "\\n") 触发 TypeError！'
+      },
+      final_answer: {
+        id: 'final_answer',
+        title: '返回最终答案并结束本轮任务',
+        stage: '阶段 3 · 任务完成',
+        accent: '#10b981',
+        badgeClass: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
+        primaryFile: 'agent',
+        codeRanges: {
+          agent: [[32, 33], [54, 54]],
+          tools: []
+        },
+        activeEdges: ['edge-check-final'],
+        summary: '模型不再请求工具，return msg.content or "" 跳出 for 循环，回到 __main__ 的 REPL 中打印结果，并等待用户的下一个问题。',
+        whyItMatters: [
+          '此时 messages 里已经完整保留了本轮的所有思考、工具调用、工具返回和最终回答。',
+          '当用户紧接着问“把刚才读到的内容改写一下”时，Agent 无需重新读文件就能直接基于上下文继续工作。'
+        ],
+        io: {
+          input: 'msg.content (大模型的自然语言总结)',
+          output: '终端输出最终回复，程序回到 input("你> ")'
+        },
+        pitfall: '如果多轮对话持续非常久，messages 里的历史工具输出会不断累积。进阶优化时可以给上下文做摘要压缩或滑动窗口清理。'
+      },
+      max_steps: {
+        id: 'max_steps',
+        title: '最大步数熔断兜底',
+        stage: '阶段 3 · 安全边界',
+        accent: '#f43f5e',
+        badgeClass: 'bg-rose-500/15 text-rose-300 border-rose-500/30',
+        primaryFile: 'agent',
+        codeRanges: {
+          agent: [[15, 15], [26, 26], [46, 46]],
+          tools: []
+        },
+        activeEdges: ['edge-max-steps'],
+        summary: '如果连续循环了 MAX_STEPS（20）圈，大模型依然在不停调用工具而不给出最终回答，for 循环自然结束，返回 "(达到最大步数，已停止)"。',
+        whyItMatters: [
+          '防止死循环：比如模型想运行一个不存在的命令，或者反复改错同一行代码，没有步数上限就会一直烧钱直到账户余额归零。',
+          '可控性：将不可预测的 AI 循环约束在确定的资源边界内，是生产级 Agent 的必备底线。'
+        ],
+        io: {
+          input: '循环计数器耗尽 (20次迭代均未触发 return)',
+          output: '提示字符串 "(达到最大步数，已停止)"'
+        },
+        pitfall: '如果发现复杂任务经常触发 20 步上限，可以调大 MAX_STEPS，或在接近上限（如第 19 步）时往 messages 插入一条提示让模型尽快总结。'
+      },
+      tool_loop: {
+        id: 'tool_loop',
+        title: '批量工具调度、JSON 解析与结果回填',
+        stage: '阶段 3 · 工具调度与反馈闭环',
+        accent: '#f59e0b',
+        badgeClass: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
+        primaryFile: 'agent',
+        codeRanges: {
+          agent: [[35, 44]],
+          tools: []
+        },
+        activeEdges: ['edge-check-loop', 'edge-loop-exec', 'edge-loop-llm'],
+        summary: '遍历 msg.tool_calls 中的每一个工具请求：解析 JSON 参数 -> 调用 execute(name, args) -> 把执行结果以 role="tool" 且携带精确 tool_call_id 的格式追加到 messages，然后自动进入下一轮循环。',
+        whyItMatters: [
+          '支持并行工具调用（Parallel Tool Calling）：现代大模型可能在一轮回复里同时要求“读文件 A”和“读文件 B”。for call in msg.tool_calls 保证每个请求都被逐一回应，缺一不可。',
+          '防御性 JSON 解析：大模型偶尔会吐出语法残缺的 JSON 字符串。用 try/except json.JSONDecodeError 捕获错误，并把错误文案当成工具结果喂回给模型，模型看到后会自动修正 JSON 重试！',
+          'tool_call_id 精确配对：通过 "tool_call_id": call.id 告诉大模型“这份结果对应你刚才的第几个请求”。'
+        ],
+        io: {
+          input: 'call.id, call.function.name, call.function.arguments (JSON字符串)',
+          output: 'messages.append({"role": "tool", "tool_call_id": call.id, "content": result})'
+        },
+        pitfall: '必须保证 msg.tool_calls 里有 N 个调用，就向 messages 里追加 N 条对应的 role="tool" 消息。少一条或多一条，下一次 API 调用都会报错！'
+      },
+      execute_tool: {
+        id: 'execute_tool',
+        title: 'execute() 安全执行网关（永不崩溃设计）',
+        stage: '阶段 4 · 工具执行层',
+        accent: '#fb923c',
+        badgeClass: 'bg-orange-500/15 text-orange-300 border-orange-500/30',
+        primaryFile: 'tools',
+        codeRanges: {
+          agent: [[43, 43]],
+          tools: [[7, 8], [77, 87]]
+        },
+        activeEdges: ['edge-loop-exec', 'edge-exec-concrete', 'edge-concrete-back'],
+        summary: '工具执行的统一安全入口：先校验工具名是否存在，再用 try/except 兜底所有运行异常，最后检查返回长度，超过 MAX_OUTPUT（8000字符）则自动截断。',
+        whyItMatters: [
+          '“把异常变成观察（Error as Observation）”：这是写好 Agent 最核心的工程思想！文件不存在、命令报错、参数名传错时，绝对不能让 Python 进程崩溃退出，而是把报错字符串返回给大模型——模型读懂报错后会自己换路径、装依赖或修正参数！',
+          '工具幻觉防护：如果模型编造了一个不存在的工具名，execute 会温和地返回可用工具列表，引导模型纠偏。',
+          '上下文防爆（MAX_OUTPUT=8000）：防止模型不小心读了一个 50MB 的日志文件把 Token 窗口撑爆。'
+        ],
+        io: {
+          input: 'name (工具名), args (解析后的 dict 参数)',
+          output: '永远是合法的 str（成功结果 / Error 信息 / 截断提示）'
+        },
+        pitfall: '注意 **args 解包调用 func(**args)：如果模型多传了未定义的参数名，Python 会抛出 TypeError，而你的 try/except 恰好完美接住了它并返回给模型自我纠正！'
+      },
+      concrete_tools: {
+        id: 'concrete_tools',
+        title: '五大本地原子工具（Agent 的手和眼）',
+        stage: '阶段 4 · 物理世界交互',
+        accent: '#d97706',
+        badgeClass: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
+        primaryFile: 'tools',
+        codeRanges: {
+          agent: [],
+          tools: [[38, 74]]
+        },
+        activeEdges: ['edge-exec-concrete', 'edge-concrete-back'],
+        summary: '赋予大模型感知与改变本地环境的能力：目录浏览（list_dir）、读文件（read_file）、写文件（write_file）、执行终端命令（run_shell）、抓取网页（fetch_url）。',
+        whyItMatters: [
+          '最小完备工具集：有了读写文件 + Shell + 联网，这个不到 150 行的微型 Agent 实际上已经具备了类似 Claude Code / Cursor Agent 的核心能力骨架！',
+          '超时保护：run_shell 设了 timeout=30，fetch_url 设了 timeout=15，避免一条卡死的命令或无响应网页让整个 Agent 永久挂起。',
+          '贴心细节：list_dir 给目录名末尾加上 "/" 让模型一眼分清文件和文件夹；write_file 自动 mkdir(parents=True, exist_ok=True) 省去模型手动建目录的步骤。'
+        ],
+        io: {
+          input: '经 JSON 解析后的具名参数（path / content / command / url）',
+          output: '本地文件系统、Shell 进程或 HTTP 响应的字符串结果'
+        },
+        pitfall: '安全提醒：run_shell(..., shell=True) 拥有你当前用户的完整终端权限！在真实生产或敏感目录下运行时，建议在 execute() 中增加危险命令（如 rm -rf）的人工确认步骤。'
+      }
+    };
+
+    // Quick-jump pills for left panel
+    const BLOCK_PILLS = {
+      agent: [
+        { nodeId: 'client_init', label: '1. 初始化配置', lines: '1-20' },
+        { nodeId: 'append_user', label: '2. 接收输入', lines: '23-24' },
+        { nodeId: 'llm_call', label: '3. LLM 推理', lines: '26-29' },
+        { nodeId: 'check_tools', label: '4. 分支判断', lines: '31-33' },
+        { nodeId: 'tool_loop', label: '5. 工具调度', lines: '35-44' },
+        { nodeId: 'max_steps', label: '6. 步数熔断', lines: '46' },
+        { nodeId: 'repl_entry', label: '7. REPL 入口', lines: '48-54' }
+      ],
+      tools: [
+        { nodeId: 'tool_registry', label: '1. @tool 装饰器', lines: '1-36' },
+        { nodeId: 'concrete_tools', label: '2. 五大工具实现', lines: '38-74' },
+        { nodeId: 'execute_tool', label: '3. execute 安全网关', lines: '77-87' }
+      ]
+    };
+
+    // =========================================================================
+    // 3. REALISTIC EXECUTION SCENARIOS (STEP-BY-STEP SIMULATOR)
+    // =========================================================================
+    const SCENARIOS = {
+      normal: {
+        name: '场景1: 多轮工具调用',
+        steps: [
+          {
+            nodeId: 'tool_registry',
+            file: 'tools',
+            highlightLines: [11, 27],
+            label: 'Step 1/9 · 启动导入：注册 5 个工具',
+            narration: '运行 python agent.py，执行第 7 行导入 tools 模块。Python 自动运行 5 个 @tool 装饰器，把 list_dir、read_file、write_file、run_shell、fetch_url 全部登记到 TOOLS 字典。',
+            messages: []
+          },
+          {
+            nodeId: 'client_init',
+            file: 'agent',
+            highlightLines: [9, 20],
+            label: 'Step 2/9 · 初始化 DeepSeek 客户端与人设',
+            narration: '创建 OpenAI 客户端指向 https://api.deepseek.com，读取 MODEL、MAX_STEPS=20 以及 SYSTEM 系统提示词。',
+            messages: []
+          },
+          {
+            nodeId: 'repl_entry',
+            file: 'agent',
+            highlightLines: [48, 54],
+            label: 'Step 3/9 · 初始化记忆列表 & 等待提问',
+            narration: '在 while True 之外创建 messages = [{"role": "system", ...}]。用户输入："帮我看看当前目录有什么文件，并总结 README.md"。',
+            messages: [
+              { role: 'system', content: '你是一个能使用工具的助手，在用户当前目录下完成任务。必要时调用工具，完成后用简洁的语言汇报结果。' }
+            ]
+          },
+          {
+            nodeId: 'append_user',
+            file: 'agent',
+            highlightLines: [23, 24],
+            label: 'Step 4/9 · 将用户问题追加进 messages',
+            narration: '进入 run() 函数，把用户指令包装为 role="user" 塞入 messages 列表末尾。',
+            messages: [
+              { role: 'system', content: '你是一个能使用工具的助手，在用户当前目录下完成任务。必要时调用工具，完成后用简洁的语言汇报结果。' },
+              { role: 'user', content: '帮我看看当前目录有什么文件，并总结 README.md' }
+            ]
+          },
+          {
+            nodeId: 'llm_call',
+            file: 'agent',
+            highlightLines: [26, 29],
+            label: 'Step 5/9 · [第1圈] 调用 LLM 推理决策',
+            narration: '把 messages 和 get_schemas()（5个工具说明书）发给 DeepSeek。模型判断需要先看目录，返回 tool_calls: [list_dir(path=".")]；代码立刻将该 assistant 消息存入 messages。',
+            messages: [
+              { role: 'system', content: '你是一个能使用工具的助手，在用户当前目录下完成任务...' },
+              { role: 'user', content: '帮我看看当前目录有什么文件，并总结 README.md' },
+              { role: 'assistant', tool_calls: [{ id: 'call_01', name: 'list_dir', args: '{"path": "."}' }] }
+            ]
+          },
+          {
+            nodeId: 'tool_loop',
+            file: 'agent',
+            highlightLines: [35, 44],
+            label: 'Step 6/9 · [第1圈] 解析参数并派发工具',
+            narration: '检测到 msg.tool_calls 非空！进入 for 循环：json.loads 解析出 {"path": "."}，终端打印 🔧list_dir({"path": "."})，准备调用 execute("list_dir", {"path": "."})。',
+            messages: [
+              { role: 'system', content: '你是一个能使用工具的助手，在用户当前目录下完成任务...' },
+              { role: 'user', content: '帮我看看当前目录有什么文件，并总结 README.md' },
+              { role: 'assistant', tool_calls: [{ id: 'call_01', name: 'list_dir', args: '{"path": "."}' }] }
+            ]
+          },
+          {
+            nodeId: 'execute_tool',
+            file: 'tools',
+            highlightLines: [77, 87],
+            label: 'Step 7/9 · [第1圈] execute() 执行 list_dir 并回填',
+            narration: 'tools.py 校验 "list_dir" 存在，安全调用 list_dir(".") 返回 "README.md\\nagent.py\\ntools.py"，未超 8000 字。agent.py 将结果以 role="tool", tool_call_id="call_01" 写入 messages！',
+            messages: [
+              { role: 'system', content: '你是一个能使用工具的助手，在用户当前目录下完成任务...' },
+              { role: 'user', content: '帮我看看当前目录有什么文件，并总结 README.md' },
+              { role: 'assistant', tool_calls: [{ id: 'call_01', name: 'list_dir', args: '{"path": "."}' }] },
+              { role: 'tool', tool_call_id: 'call_01', content: 'README.md\nagent.py\ntools.py' }
+            ]
+          },
+          {
+            nodeId: 'llm_call',
+            file: 'agent',
+            highlightLines: [26, 29],
+            label: 'Step 8/9 · [第2圈] LLM 看到目录，继续调 read_file',
+            narration: '循环自动进入第 2 圈！大模型看到目录里有 README.md，于是再次发起 tool_calls: [read_file(path="README.md")]，execute() 读取内容并作为 role="tool" 回填。',
+            messages: [
+              { role: 'system', content: '你是一个能使用工具的助手，在用户当前目录下完成任务...' },
+              { role: 'user', content: '帮我看看当前目录有什么文件，并总结 README.md' },
+              { role: 'assistant', tool_calls: [{ id: 'call_01', name: 'list_dir', args: '{"path": "."}' }] },
+              { role: 'tool', tool_call_id: 'call_01', content: 'README.md\nagent.py\ntools.py' },
+              { role: 'assistant', tool_calls: [{ id: 'call_02', name: 'read_file', args: '{"path": "README.md"}' }] },
+              { role: 'tool', tool_call_id: 'call_02', content: '# Mini Agent\n一个极简的 DeepSeek Tool-Calling Agent 演示项目。' }
+            ]
+          },
+          {
+            nodeId: 'final_answer',
+            file: 'agent',
+            highlightLines: [31, 33],
+            label: 'Step 9/9 · [第3圈] 信息齐备，输出最终答案！',
+            narration: '第 3 圈 LLM 发现已经拿到目录和文件内容，不再返回 tool_calls，而是直接生成中文总结。if not msg.tool_calls 成立，return 最终答案并打印给用户！',
+            messages: [
+              { role: 'system', content: '你是一个能使用工具的助手，在用户当前目录下完成任务...' },
+              { role: 'user', content: '帮我看看当前目录有什么文件，并总结 README.md' },
+              { role: 'assistant', tool_calls: [{ id: 'call_01', name: 'list_dir', args: '{"path": "."}' }] },
+              { role: 'tool', tool_call_id: 'call_01', content: 'README.md\nagent.py\ntools.py' },
+              { role: 'assistant', tool_calls: [{ id: 'call_02', name: 'read_file', args: '{"path": "README.md"}' }] },
+              { role: 'tool', tool_call_id: 'call_02', content: '# Mini Agent\n一个极简的 DeepSeek Tool-Calling Agent 演示项目。' },
+              { role: 'assistant', content: '当前目录包含 README.md、agent.py 和 tools.py。README.md 介绍这是一个极简的 DeepSeek 工具调用 Agent 演示项目。' }
+            ]
+          }
+        ]
+      },
+      error: {
+        name: '场景2: 异常自愈演示',
+        steps: [
+          {
+            nodeId: 'append_user',
+            file: 'agent',
+            highlightLines: [23, 24],
+            label: 'Step 1/5 · 用户要求读取一个拼错名字的文件',
+            narration: '用户输入："帮我读取 config.yaml 里的端口配置"。此时目录里其实只有 config.yml（没有 a）。',
+            messages: [
+              { role: 'system', content: '你是一个能使用工具的助手，在用户当前目录下完成任务...' },
+              { role: 'user', content: '帮我读取 config.yaml 里的端口配置' }
+            ]
+          },
+          {
+            nodeId: 'llm_call',
+            file: 'agent',
+            highlightLines: [26, 29],
+            label: 'Step 2/5 · [第1圈] LLM 尝试直接读取 config.yaml',
+            narration: '大模型决定直接调用 read_file(path="config.yaml")。',
+            messages: [
+              { role: 'system', content: '你是一个能使用工具的助手，在用户当前目录下完成任务...' },
+              { role: 'user', content: '帮我读取 config.yaml 里的端口配置' },
+              { role: 'assistant', tool_calls: [{ id: 'call_e1', name: 'read_file', args: '{"path": "config.yaml"}' }] }
+            ]
+          },
+          {
+            nodeId: 'execute_tool',
+            file: 'tools',
+            highlightLines: [81, 84],
+            label: 'Step 3/5 · 触发 FileNotFoundError，但程序不崩溃！',
+            narration: 'read_file 抛出 FileNotFoundError，被 execute() 的 except Exception as e 稳稳接住！它把 "Error: FileNotFoundError: ..." 当作普通字符串返回并写入 messages。',
+            messages: [
+              { role: 'system', content: '你是一个能使用工具的助手，在用户当前目录下完成任务...' },
+              { role: 'user', content: '帮我读取 config.yaml 里的端口配置' },
+              { role: 'assistant', tool_calls: [{ id: 'call_e1', name: 'read_file', args: '{"path": "config.yaml"}' }] },
+              { role: 'tool', tool_call_id: 'call_e1', content: "Error: FileNotFoundError: [Errno 2] No such file or directory: 'config.yaml'" }
+            ]
+          },
+          {
+            nodeId: 'llm_call',
+            file: 'agent',
+            highlightLines: [26, 29],
+            label: 'Step 4/5 · [第2圈] 大模型读懂报错，主动自愈！',
+            narration: '大模型看到文件不存在的报错后，自主决策先调用 list_dir(".") 查看真实文件名，发现叫 config.yml，再自动调用 read_file("config.yml")！',
+            messages: [
+              { role: 'system', content: '你是一个能使用工具的助手，在用户当前目录下完成任务...' },
+              { role: 'user', content: '帮我读取 config.yaml 里的端口配置' },
+              { role: 'assistant', tool_calls: [{ id: 'call_e1', name: 'read_file', args: '{"path": "config.yaml"}' }] },
+              { role: 'tool', tool_call_id: 'call_e1', content: "Error: FileNotFoundError: [Errno 2] No such file or directory: 'config.yaml'" },
+              { role: 'assistant', tool_calls: [{ id: 'call_e2', name: 'list_dir', args: '{"path": "."}' }] },
+              { role: 'tool', tool_call_id: 'call_e2', content: 'agent.py\nconfig.yml\ntools.py' },
+              { role: 'assistant', tool_calls: [{ id: 'call_e3', name: 'read_file', args: '{"path": "config.yml"}' }] },
+              { role: 'tool', tool_call_id: 'call_e3', content: 'port: 8080\nhost: 0.0.0.0' }
+            ]
+          },
+          {
+            nodeId: 'final_answer',
+            file: 'agent',
+            highlightLines: [31, 33],
+            label: 'Step 5/5 · 自愈成功，返回准确答案',
+            narration: '这就是“Error as Observation”的威力：Agent 自己排查了文件拼写差异并给出了准确结果！',
+            messages: [
+              { role: 'system', content: '你是一个能使用工具的助手，在用户当前目录下完成任务...' },
+              { role: 'user', content: '帮我读取 config.yaml 里的端口配置' },
+              { role: 'assistant', tool_calls: [{ id: 'call_e1', name: 'read_file', args: '{"path": "config.yaml"}' }] },
+              { role: 'tool', tool_call_id: 'call_e1', content: "Error: FileNotFoundError: [Errno 2] No such file or directory: 'config.yaml'" },
+              { role: 'assistant', tool_calls: [{ id: 'call_e2', name: 'list_dir', args: '{"path": "."}' }] },
+              { role: 'tool', tool_call_id: 'call_e2', content: 'agent.py\nconfig.yml\ntools.py' },
+              { role: 'assistant', tool_calls: [{ id: 'call_e3', name: 'read_file', args: '{"path": "config.yml"}' }] },
+              { role: 'tool', tool_call_id: 'call_e3', content: 'port: 8080\nhost: 0.0.0.0' },
+              { role: 'assistant', content: '未找到 config.yaml，但在当前目录发现了 config.yml。其中的端口配置为 port: 8080（监听地址 0.0.0.0）。' }
+            ]
+          }
+        ]
+      }
+    };
+
+    const REGISTERED_TOOLS = [
+      {
+        name: 'list_dir',
+        lines: '38-44',
+        desc: '列出某个目录下的文件和子目录',
+        params: { path: '目录路径，当前目录写。' },
+        safety: '只读操作，使用 pathlib.Path 跨平台兼容'
+      },
+      {
+        name: 'read_file',
+        lines: '47-50',
+        desc: '读取一个文本文件的内容',
+        params: { path: '文件路径' },
+        safety: '只读，超过 8000 字符会被 execute() 自动截断'
+      },
+      {
+        name: 'write_file',
+        lines: '53-59',
+        desc: '把内容写进文件，已存在则覆盖，目录不存在会自动创建。',
+        params: { path: '文件路径', content: '要写入的内容' },
+        safety: '写操作，会覆盖已有文件；自动创建父目录'
+      },
+      {
+        name: 'run_shell',
+        lines: '62-67',
+        desc: '在当前目录执行一条shell命令，返回退出码,标准输出和错误输出。',
+        params: { command: 'shell要执行的命令' },
+        safety: '高权限操作！已设 timeout=30 防卡死，捕获 stdout+stderr'
+      },
+      {
+        name: 'fetch_url',
+        lines: '70-75',
+        desc: '抓取一个网页或接口的文本内容。url必须以http或https开头。',
+        params: { url: '网页或接口的url' },
+        safety: '网络只读，已设 timeout=15 与自定义 User-Agent: Makima-agent'
+      }
+    ];
+
+    // =========================================================================
+    // 4. APPLICATION STATE
+    // =========================================================================
+    const state = {
+      activeFile: 'agent',        // 'agent' | 'tools'
+      activeNodeId: 'llm_call',   // Currently highlighted node (null = overview)
+      activeInspTab: 'explain',   // 'explain' | 'messages' | 'registry'
+      scenarioKey: 'normal',      // 'normal' | 'error'
+      simMode: false,             // true when stepping through simulation
+      simStepIndex: 0,
+      playTimer: null,
+      diagramZoom: 100,
+      diagramExpanded: false
+    };
+
+    // =========================================================================
+    // 5. SYNTAX HIGHLIGHTER (Lightweight, Safe, Exact)
+    // =========================================================================
+    function escapeHtml(str) {
+      return str
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    }
+
+    function highlightPythonLine(rawLine) {
+      if (!rawLine) return '&nbsp;';
+      // Separate trailing comment (outside quotes)
+      let codePart = rawLine;
+      let commentPart = '';
+      let inSingle = false, inDouble = false;
+      for (let i = 0; i < rawLine.length; i++) {
+        const ch = rawLine[i];
+        const prev = i > 0 ? rawLine[i - 1] : '';
+        if (ch === "'" && !inDouble && prev !== '\\') inSingle = !inSingle;
+        else if (ch === '"' && !inSingle && prev !== '\\') inDouble = !inDouble;
+        else if (ch === '#' && !inSingle && !inDouble) {
+          codePart = rawLine.slice(0, i);
+          commentPart = rawLine.slice(i);
+          break;
+        }
+      }
+
+      // Tokenize strings first so keywords inside strings are untouched
+      const placeholders = [];
+      let safe = escapeHtml(codePart).replace(/(f?&quot;.*?&quot;|f?&#39;.*?&#39;|f?"[^"]*"|f?'[^']*')/g, (m) => {
+        const idx = placeholders.length;
+        placeholders.push(`<span class="tok-str">${m}</span>`);
+        return `__STR_${idx}__`;
+      });
+
+      // Decorators
+      safe = safe.replace(/^(\s*)(@\w+)/, '$1<span class="tok-dec">$2</span>');
+      // Keywords
+      const kwRegex = /\b(import|from|def|return|for|in|if|not|try|except|else|while|break|with|as|or|and|True|False|None)\b/g;
+      safe = safe.replace(kwRegex, '<span class="tok-kw">$1</span>');
+      // Function definitions
+      safe = safe.replace(/(<span class="tok-kw">def<\/span>\s+)(\w+)/g, '$1<span class="tok-fn">$2</span>');
+      // Classes / Constants
+      safe = safe.replace(/\b(OpenAI|Path|Exception|MAX_STEPS|MAX_OUTPUT|TOOLS|MODEL|SYSTEM)\b/g, '<span class="tok-cls">$1</span>');
+      // Numbers
+      safe = safe.replace(/\b(\d+)\b/g, '<span class="tok-num">$1</span>');
+
+      // Restore strings
+      safe = safe.replace(/__STR_(\d+)__/g, (_, i) => placeholders[Number(i)]);
+
+      if (commentPart) {
+        safe += `<span class="tok-com">${escapeHtml(commentPart)}</span>`;
+      }
+      return safe;
+    }
+
+    // Map any (file, 1-based lineNumber) -> best matching nodeId
+    function getNodeForLine(fileKey, lineNum) {
+      // Exact priority order so overlapping lines pick the most specific node
+      const priority = fileKey === 'agent'
+        ? ['max_steps', 'final_answer', 'check_tools', 'tool_loop', 'llm_call', 'append_user', 'repl_entry', 'tool_registry', 'client_init']
+        : ['execute_tool', 'concrete_tools', 'tool_registry'];
+
+      for (const nid of priority) {
+        const ranges = NODES[nid].codeRanges[fileKey] || [];
+        for (const [start, end] of ranges) {
+          if (lineNum >= start && lineNum <= end) {
+            // Special precision: line 46 is max_steps, line 15/26 belong to client_init / llm_call on direct click
+            if (nid === 'max_steps' && lineNum !== 46) continue;
+            if (nid === 'final_answer' && lineNum === 54) continue;
+            if (nid === 'execute_tool' && fileKey === 'agent') continue;
+            return nid;
+          }
+        }
+      }
+      return fileKey === 'agent' ? 'client_init' : 'tool_registry';
+    }
+
+    // =========================================================================
+    // 6. RENDERING FUNCTIONS
+    // =========================================================================
+    function renderCodePanel(scrollToActive = false) {
+      const fileObj = FILES[state.activeFile];
+      const container = document.getElementById('code-lines-container');
+      const activeNode = state.activeNodeId ? NODES[state.activeNodeId] : null;
+
+      // Determine highlighted line ranges
+      let activeRanges = [];
+      if (state.simMode) {
+        const step = SCENARIOS[state.scenarioKey].steps[state.simStepIndex];
+        if (step.file === state.activeFile) {
+          activeRanges = [step.highlightLines];
+        }
+      } else if (activeNode) {
+        activeRanges = activeNode.codeRanges[state.activeFile] || [];
+      }
+
+      const accent = activeNode ? activeNode.accent : '#38bdf8';
+
+      let html = '';
+      let firstActiveLineElId = null;
+
+      fileObj.lines.forEach((raw, idx) => {
+        const lineNum = idx + 1;
+        const isActive = activeRanges.some(([s, e]) => lineNum >= s && lineNum <= e);
+        if (isActive && !firstActiveLineElId) firstActiveLineElId = `code-line-${lineNum}`;
+        const mappedNode = getNodeForLine(state.activeFile, lineNum);
+        const nodeColor = NODES[mappedNode] ? NODES[mappedNode].accent : '#38bdf8';
+
+        html += `
+          <div id="code-line-${lineNum}"
+               class="code-line ${isActive ? 'active-line' : ''}"
+               style="--active-accent: ${accent}; border-left-color: ${isActive ? accent : 'transparent'};"
+               data-line="${lineNum}"
+               data-node="${mappedNode}"
+               title="点击查看对应流程节点：${NODES[mappedNode].title}">
+            <span class="line-num">${lineNum}</span>
+            <span class="line-code">${highlightPythonLine(raw)}</span>
+          </div>
+        `;
+      });
+
+      container.innerHTML = html;
+
+      // Update file tab styles
+      document.getElementById('tab-agent').className = state.activeFile === 'agent'
+        ? 'file-tab flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-md bg-sky-500/20 text-sky-300 border border-sky-500/35'
+        : 'file-tab flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-md text-slate-400 hover:text-slate-200 border border-transparent';
+      document.getElementById('tab-tools').className = state.activeFile === 'tools'
+        ? 'file-tab flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-md bg-amber-500/20 text-amber-300 border border-amber-500/35'
+        : 'file-tab flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-md text-slate-400 hover:text-slate-200 border border-transparent';
+
+      // Update active line range footer
+      const rangeText = activeRanges.length
+        ? `${fileObj.name} · 第 ${activeRanges.map(([s, e]) => s === e ? `${s}` : `${s}-${e}`).join(', ')} 行`
+        : `${fileObj.name} · 点击任意行高亮`;
+      document.getElementById('active-line-range').textContent = rangeText;
+
+      if (scrollToActive && firstActiveLineElId) {
+        const el = document.getElementById(firstActiveLineElId);
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }
+
+    function renderDiagram() {
+      const svg = document.getElementById('agent-flow-svg');
+      const activeId = state.activeNodeId;
+      const activeNode = activeId ? NODES[activeId] : null;
+      const activeEdges = activeNode ? activeNode.activeEdges : [];
+
+      // Nodes
+      svg.querySelectorAll('.flow-node').forEach(g => {
+        const nid = g.getAttribute('data-node');
+        g.classList.remove('active-node', 'dimmed');
+        if (activeId) {
+          if (nid === activeId) {
+            g.classList.add('active-node');
+          } else {
+            g.classList.add('dimmed');
+          }
+        }
+      });
+
+      // Edges
+      svg.querySelectorAll('.flow-edge').forEach(path => {
+        const eid = path.getAttribute('id');
+        path.classList.remove('active-edge');
+        if (activeId && activeEdges.includes(eid)) {
+          path.classList.add('active-edge');
+          path.setAttribute('stroke', activeNode.accent);
+          path.setAttribute('stroke-width', '2.6');
+          path.setAttribute('marker-end', 'url(#arrow-sky)');
+          path.style.opacity = '1';
+        } else {
+          path.setAttribute('stroke', '#475569');
+          path.setAttribute('stroke-width', eid === 'edge-schema-llm' || eid === 'edge-max-steps' ? '1.4' : '1.8');
+          path.setAttribute('marker-end', 'url(#arrow-slate)');
+          path.style.opacity = activeId ? '0.28' : '0.85';
+        }
+      });
+
+      // Header badge
+      const badge = document.getElementById('diagram-active-badge');
+      if (activeNode) {
+        badge.textContent = `当前聚焦：${activeNode.title}`;
+        badge.className = `text-[11px] px-2.5 py-0.5 rounded-full border font-medium ${activeNode.badgeClass}`;
+      } else {
+        badge.textContent = '全部节点概览';
+        badge.className = 'text-[11px] px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700 font-medium';
+      }
+    }
+
+    function getCurrentMessages() {
+      if (state.simMode) {
+        return SCENARIOS[state.scenarioKey].steps[state.simStepIndex].messages;
+      }
+      // In click-to-explore mode, show a representative snapshot matching the clicked node
+      const snapshots = {
+        tool_registry: [],
+        client_init: [],
+        repl_entry: SCENARIOS.normal.steps[2].messages,
+        append_user: SCENARIOS.normal.steps[3].messages,
+        llm_call: SCENARIOS.normal.steps[4].messages,
+        check_tools: SCENARIOS.normal.steps[4].messages,
+        tool_loop: SCENARIOS.normal.steps[6].messages,
+        execute_tool: SCENARIOS.normal.steps[6].messages,
+        concrete_tools: SCENARIOS.normal.steps[6].messages,
+        final_answer: SCENARIOS.normal.steps[8].messages,
+        max_steps: SCENARIOS.normal.steps[7].messages
+      };
+      return snapshots[state.activeNodeId] || SCENARIOS.normal.steps[2].messages;
+    }
+
+    function renderInspector() {
+      const node = state.activeNodeId ? NODES[state.activeNodeId] : NODES.llm_call;
+      const explainEl = document.getElementById('panel-explain');
+      const messagesEl = document.getElementById('panel-messages');
+      const registryEl = document.getElementById('panel-registry');
+
+      // Simulation banner callout if in simMode
+      let simBannerHtml = '';
+      if (state.simMode) {
+        const step = SCENARIOS[state.scenarioKey].steps[state.simStepIndex];
+        simBannerHtml = `
+          <div class="rounded-xl border border-sky-500/40 bg-sky-950/40 p-3.5">
+            <div class="flex items-center justify-between gap-2 mb-1">
+              <span class="text-xs font-bold text-sky-300 flex items-center gap-1.5">
+                <i data-lucide="play-circle" class="w-4 h-4"></i>
+                ${step.label}
+              </span>
+              <span class="text-[11px] font-mono-code text-sky-400/80">${SCENARIOS[state.scenarioKey].name}</span>
+            </div>
+            <p class="text-xs text-slate-200 leading-relaxed">${step.narration}</p>
+          </div>
+        `;
+      }
+
+      // Cross-file jump buttons
+      const fileButtons = [];
+      if ((node.codeRanges.agent || []).length) {
+        const r = node.codeRanges.agent.map(([s, e]) => s === e ? `L${s}` : `L${s}-${e}`).join(', ');
+        fileButtons.push(`<button type="button" data-jump-file="agent" data-jump-node="${node.id}" class="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[11px] font-mono-code text-sky-300 border border-slate-700 transition">agent.py ${r}</button>`);
+      }
+      if ((node.codeRanges.tools || []).length) {
+        const r = node.codeRanges.tools.map(([s, e]) => s === e ? `L${s}` : `L${s}-${e}`).join(', ');
+        fileButtons.push(`<button type="button" data-jump-file="tools" data-jump-node="${node.id}" class="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[11px] font-mono-code text-amber-300 border border-slate-700 transition">tools.py ${r}</button>`);
+      }
+
+      // Tab 1: Deep Explanation
+      explainEl.innerHTML = `
+        ${simBannerHtml}
+        <div class="rounded-xl border border-slate-800 bg-slate-900/70 p-4 space-y-3">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <span class="inline-block text-[11px] font-semibold px-2 py-0.5 rounded border mb-1.5 ${node.badgeClass}">${node.stage}</span>
+              <h2 class="text-sm sm:text-base font-bold text-white">${node.title}</h2>
+            </div>
+            <div class="flex items-center gap-1.5">${fileButtons.join('')}</div>
+          </div>
+
+          <p class="text-xs sm:text-[13px] text-slate-300 leading-relaxed">${node.summary}</p>
+
+          <!-- I/O Grid -->
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+            <div class="rounded-lg bg-[#0b1120] border border-slate-800 p-2.5">
+              <div class="text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-1">输入 (Input)</div>
+              <div class="text-xs text-sky-200 font-mono-code leading-snug">${node.io.input}</div>
+            </div>
+            <div class="rounded-lg bg-[#0b1120] border border-slate-800 p-2.5">
+              <div class="text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-1">输出 / 状态变化 (Output)</div>
+              <div class="text-xs text-emerald-200 font-mono-code leading-snug">${node.io.output}</div>
+            </div>
+          </div>
+
+          <!-- Design Rationale -->
+          <div class="pt-1">
+            <h3 class="text-xs font-semibold text-slate-200 mb-2 flex items-center gap-1.5">
+              <i data-lucide="sparkles" class="w-3.5 h-3.5 text-amber-400"></i>
+              为什么这样设计？（核心知识点）
+            </h3>
+            <ul class="space-y-1.5">
+              ${node.whyItMatters.map(item => `
+                <li class="text-xs text-slate-300 leading-relaxed flex items-start gap-2">
+                  <span class="w-1.5 h-1.5 rounded-full mt-1.5 shrink-0" style="background:${node.accent}"></span>
+                  <span>${item}</span>
+                </li>
+              `).join('')}
+            </ul>
+          </div>
+
+          <!-- Pro Tip / Pitfall -->
+          <div class="rounded-lg border border-amber-500/30 bg-amber-950/25 p-3 flex items-start gap-2.5">
+            <i data-lucide="lightbulb" class="w-4 h-4 text-amber-400 shrink-0 mt-0.5"></i>
+            <div class="text-xs text-amber-100/90 leading-relaxed">
+              <span class="font-semibold text-amber-300">工程细节提醒：</span>${node.pitfall}
+            </div>
+          </div>
+        </div>
+      `;
+
+      // Tab 2: Live messages[] Memory
+      const msgs = getCurrentMessages();
+      document.getElementById('msg-count-badge').textContent = String(msgs.length);
+
+      if (msgs.length === 0) {
+        messagesEl.innerHTML = `
+          <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-6 text-center">
+            <p class="text-xs text-slate-400">当前处于启动/初始化阶段，<code class="text-sky-300 font-mono-code">messages</code> 列表尚未创建。</p>
+            <p class="text-[11px] text-slate-500 mt-1">点击 <span class="text-sky-300">REPL 交互主循环</span> 或点击顶部 <span class="text-sky-300">逐步演示</span> 查看上下文如何一步步增长。</p>
+          </div>
+        `;
+      } else {
+        const roleMeta = {
+          system: { label: 'SYSTEM', cls: 'bg-purple-500/15 text-purple-300 border-purple-500/30', border: 'border-purple-500/30' },
+          user: { label: 'USER', cls: 'bg-sky-500/15 text-sky-300 border-sky-500/30', border: 'border-sky-500/30' },
+          assistant: { label: 'ASSISTANT', cls: 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30', border: 'border-indigo-500/30' },
+          tool: { label: 'TOOL RESULT', cls: 'bg-amber-500/15 text-amber-300 border-amber-500/30', border: 'border-amber-500/30' }
+        };
+        messagesEl.innerHTML = `
+          <div class="text-[11px] text-slate-400 flex items-center justify-between pb-1">
+            <span>每次调用 LLM 时，下方全部 ${msgs.length} 条记录都会完整发送给 API：</span>
+            <span class="font-mono-code text-slate-500">len(messages) == ${msgs.length}</span>
+          </div>
+          ${msgs.map((m, idx) => {
+            const meta = roleMeta[m.role] || roleMeta.assistant;
+            const isLast = idx === msgs.length - 1;
+            let bodyHtml = '';
+            if (m.tool_calls) {
+              bodyHtml = m.tool_calls.map(tc => `
+                <div class="mt-1.5 rounded bg-[#0b1120] border border-slate-800 px-2.5 py-1.5 font-mono-code text-[11px] text-amber-200">
+                  <span class="text-slate-500">id="${tc.id}"</span> · <span class="text-sky-300">${tc.name}</span>(${escapeHtml(tc.args)})
+                </div>
+              `).join('');
+            } else {
+              bodyHtml = `<pre class="mt-1 text-xs text-slate-200 whitespace-pre-wrap font-mono-code leading-relaxed">${escapeHtml(m.content)}</pre>`;
+            }
+            return `
+              <div class="rounded-lg border ${isLast ? meta.border + ' bg-slate-900' : 'border-slate-800/90 bg-slate-900/50'} p-3">
+                <div class="flex items-center justify-between gap-2">
+                  <div class="flex items-center gap-2">
+                    <span class="text-[10px] font-mono-code text-slate-500">#${idx}</span>
+                    <span class="text-[10px] font-bold px-1.5 py-0.5 rounded border ${meta.cls}">${meta.label}</span>
+                    ${m.tool_call_id ? `<span class="text-[10px] font-mono-code text-amber-400/90">tool_call_id: "${m.tool_call_id}"</span>` : ''}
+                  </div>
+                  ${isLast ? '<span class="text-[10px] text-emerald-400 font-medium">最新追加</span>' : ''}
+                </div>
+                ${bodyHtml}
+              </div>
+            `;
+          }).join('')}
+        `;
+      }
+
+      // Tab 3: TOOLS Registry
+      registryEl.innerHTML = `
+        <div class="text-xs text-slate-400 mb-2">
+          <code class="text-amber-300 font-mono-code">get_schemas()</code> 会将下面 5 个工具自动转换为 OpenAI Function Calling JSON 格式传给 DeepSeek：
+        </div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+          ${REGISTERED_TOOLS.map(t => `
+            <div class="rounded-lg border border-slate-800 bg-slate-900/70 p-3 hover:border-amber-500/40 transition cursor-pointer" data-tool-card="${t.name}">
+              <div class="flex items-center justify-between mb-1">
+                <span class="font-mono-code text-xs font-bold text-amber-300">${t.name}()</span>
+                <span class="text-[10px] font-mono-code text-slate-500">tools.py L${t.lines}</span>
+              </div>
+              <p class="text-[11.5px] text-slate-300 mb-2">${t.desc}</p>
+              <div class="rounded bg-[#0b1120] border border-slate-800/80 p-2 font-mono-code text-[10.5px] text-slate-400 space-y-0.5">
+                ${Object.entries(t.params).map(([k, v]) => `<div><span class="text-sky-300">${k}</span>: <span class="text-emerald-300/90">"${v}"</span></div>`).join('')}
+              </div>
+              <div class="mt-2 text-[10.5px] text-slate-400 flex items-center gap-1">
+                <i data-lucide="shield-check" class="w-3 h-3 text-emerald-400 shrink-0"></i>
+                <span>${t.safety}</span>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      `;
+
+      // Toggle visible inspector panel
+      ['explain', 'messages', 'registry'].forEach(tab => {
+        document.getElementById(`panel-${tab}`).classList.toggle('hidden', state.activeInspTab !== tab);
+        const btn = document.getElementById(`insp-tab-${tab}`);
+        btn.className = state.activeInspTab === tab
+          ? 'insp-tab h-full px-2.5 text-xs font-semibold border-b-2 border-sky-400 text-sky-300 flex items-center gap-1'
+          : 'insp-tab h-full px-2.5 text-xs font-semibold border-b-2 border-transparent text-slate-400 hover:text-slate-200 flex items-center gap-1';
+      });
+
+      lucide.createIcons();
+    }
+
+    function renderStepBar() {
+      const steps = SCENARIOS[state.scenarioKey].steps;
+      const summaryEl = document.getElementById('step-summary');
+      if (summaryEl) {
+        if (state.simMode) {
+          summaryEl.textContent = steps[state.simStepIndex].label;
+        } else {
+          const activeNode = state.activeNodeId ? NODES[state.activeNodeId] : null;
+          summaryEl.textContent = activeNode ? activeNode.title : '';
+        }
+      }
+      document.getElementById('btn-prev').disabled = state.simMode && state.simStepIndex === 0;
+      document.getElementById('btn-next').disabled = state.simMode && state.simStepIndex === steps.length - 1;
+
+      const labelPlay = document.getElementById('label-play');
+      labelPlay.textContent = state.playTimer ? '暂停' : (state.simMode ? '继续' : '演示');
+    }
+
+    function renderAll(scrollCode = false) {
+      renderCodePanel(scrollCode);
+      renderDiagram();
+      renderInspector();
+      renderStepBar();
+    }
+
+    // =========================================================================
+    // 7. INTERACTION HANDLERS
+    // =========================================================================
+    function stopAutoPlay() {
+      if (state.playTimer) {
+        clearInterval(state.playTimer);
+        state.playTimer = null;
+      }
+    }
+
+    function selectNode(nodeId, preferredFile = null, scrollCode = true) {
+      stopAutoPlay();
+      state.simMode = false;
+      state.activeNodeId = nodeId;
+      if (preferredFile) {
+        state.activeFile = preferredFile;
+      } else if (nodeId && NODES[nodeId]) {
+        const node = NODES[nodeId];
+        // Switch file only if current file has no lines for this node
+        const curHas = (node.codeRanges[state.activeFile] || []).length > 0;
+        if (!curHas) state.activeFile = node.primaryFile;
+      }
+      renderAll(scrollCode);
+      const inspScroll = document.getElementById('inspector-scroll-area');
+      if (inspScroll) inspScroll.scrollTop = 0;
+    }
+
+    function goToSimStep(index) {
+      const steps = SCENARIOS[state.scenarioKey].steps;
+      const clamped = Math.max(0, Math.min(steps.length - 1, index));
+      state.simMode = true;
+      state.simStepIndex = clamped;
+      const step = steps[clamped];
+      state.activeNodeId = step.nodeId;
+      state.activeFile = step.file;
+      renderAll(true);
+    }
+
+    function togglePlay() {
+      if (state.playTimer) {
+        stopAutoPlay();
+        renderStepBar();
+        return;
+      }
+      const steps = SCENARIOS[state.scenarioKey].steps;
+      if (!state.simMode || state.simStepIndex >= steps.length - 1) {
+        goToSimStep(0);
+      }
+      state.playTimer = setInterval(() => {
+        const total = SCENARIOS[state.scenarioKey].steps.length;
+        if (state.simStepIndex < total - 1) {
+          goToSimStep(state.simStepIndex + 1);
+        } else {
+          stopAutoPlay();
+          renderStepBar();
+        }
+      }, 2800);
+      renderStepBar();
+    }
+
+    // Bind DOM Events
+    document.getElementById('tab-agent').addEventListener('click', () => {
+      state.activeFile = 'agent';
+      renderCodePanel(false);
+    });
+    document.getElementById('tab-tools').addEventListener('click', () => {
+      state.activeFile = 'tools';
+      renderCodePanel(false);
+    });
+
+    // Delegate click on code lines
+    document.getElementById('code-lines-container').addEventListener('click', (e) => {
+      const lineEl = e.target.closest('.code-line');
+      if (!lineEl) return;
+      const nodeId = lineEl.getAttribute('data-node');
+      selectNode(nodeId, state.activeFile, false);
+    });
+
+
+
+    // Click on SVG diagram nodes
+    document.getElementById('agent-flow-svg').addEventListener('click', (e) => {
+      const nodeG = e.target.closest('.flow-node');
+      if (!nodeG) return;
+      const nodeId = nodeG.getAttribute('data-node');
+      selectNode(nodeId, NODES[nodeId].primaryFile, true);
+    });
+
+    // Show all / clear focus
+    document.getElementById('btn-show-all').addEventListener('click', () => {
+      stopAutoPlay();
+      state.simMode = false;
+      state.activeNodeId = null;
+      renderAll(false);
+    });
+
+    // Inspector tabs
+    ['explain', 'messages', 'registry'].forEach(tab => {
+      document.getElementById(`insp-tab-${tab}`).addEventListener('click', () => {
+        state.activeInspTab = tab;
+        if (state.diagramExpanded) {
+          state.diagramExpanded = false;
+          const rp = document.querySelector('.right-pane');
+          const lbl = document.getElementById('label-expand-diagram');
+          if (rp) rp.classList.remove('diagram-expanded');
+          if (lbl) lbl.textContent = '收起解析';
+        }
+        renderInspector();
+      });
+    });
+
+    // Delegate cross-file jump buttons inside inspector
+    document.getElementById('panel-explain').addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-jump-file]');
+      if (!btn) return;
+      selectNode(btn.getAttribute('data-jump-node'), btn.getAttribute('data-jump-file'), true);
+    });
+
+    // Delegate tool cards click in registry tab
+    document.getElementById('panel-registry').addEventListener('click', (e) => {
+      const card = e.target.closest('[data-tool-card]');
+      if (!card) return;
+      selectNode('concrete_tools', 'tools', true);
+    });
+
+    // Simulation controls
+    document.getElementById('btn-play').addEventListener('click', togglePlay);
+    document.getElementById('btn-prev').addEventListener('click', () => {
+      stopAutoPlay();
+      if (!state.simMode) goToSimStep(0);
+      else goToSimStep(state.simStepIndex - 1);
+    });
+    document.getElementById('btn-next').addEventListener('click', () => {
+      stopAutoPlay();
+      if (!state.simMode) goToSimStep(0);
+      else goToSimStep(state.simStepIndex + 1);
+    });
+    document.getElementById('btn-reset').addEventListener('click', () => {
+      stopAutoPlay();
+      state.simMode = false;
+      state.simStepIndex = 0;
+      state.activeFile = 'agent';
+      state.activeNodeId = 'llm_call';
+      renderAll(true);
+    });
+
+    // Scenario switcher
+    function setScenario(key) {
+      stopAutoPlay();
+      state.scenarioKey = key;
+      document.getElementById('btn-scenario-normal').className = key === 'normal'
+        ? 'px-2 py-0.5 rounded font-medium bg-sky-500/20 text-sky-300'
+        : 'px-2 py-0.5 rounded font-medium text-slate-400 hover:text-slate-200';
+      document.getElementById('btn-scenario-error').className = key === 'error'
+        ? 'px-2 py-0.5 rounded font-medium bg-amber-500/20 text-amber-300'
+        : 'px-2 py-0.5 rounded font-medium text-slate-400 hover:text-slate-200';
+      goToSimStep(0);
+    }
+    document.getElementById('btn-scenario-normal').addEventListener('click', () => setScenario('normal'));
+    document.getElementById('btn-scenario-error').addEventListener('click', () => setScenario('error'));
+
+
+
+    // Keyboard navigation (Left/Right arrows in sim mode)
+    document.addEventListener('keydown', (e) => {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      if (e.key === 'ArrowRight') {
+        stopAutoPlay();
+        goToSimStep(state.simMode ? state.simStepIndex + 1 : 0);
+      } else if (e.key === 'ArrowLeft' && state.simMode) {
+        stopAutoPlay();
+        goToSimStep(state.simStepIndex - 1);
+      }
+    });
+
+    // Diagram Zoom & Expand Controls
+    function applyDiagramZoom() {
+      const svg = document.getElementById('agent-flow-svg');
+      const label = document.getElementById('zoom-label');
+      if (!svg || !label) return;
+      label.textContent = state.diagramZoom + '%';
+      if (state.diagramZoom === 100) {
+        svg.style.width = '100%';
+        svg.style.height = '100%';
+      } else {
+        svg.style.width = state.diagramZoom + '%';
+        svg.style.height = state.diagramZoom + '%';
+      }
+    }
+    document.getElementById('btn-zoom-in').addEventListener('click', () => {
+      state.diagramZoom = Math.min(200, state.diagramZoom + 20);
+      applyDiagramZoom();
+    });
+    document.getElementById('btn-zoom-out').addEventListener('click', () => {
+      state.diagramZoom = Math.max(80, state.diagramZoom - 20);
+      applyDiagramZoom();
+    });
+    document.getElementById('btn-expand-diagram').addEventListener('click', () => {
+      state.diagramExpanded = !state.diagramExpanded;
+      const rp = document.querySelector('.right-pane');
+      const lbl = document.getElementById('label-expand-diagram');
+      if (rp) rp.classList.toggle('diagram-expanded', state.diagramExpanded);
+      if (lbl) lbl.textContent = state.diagramExpanded ? '展开解析' : '收起解析';
+    });
+
+    // Initial render
+    renderAll(true);
+    lucide.createIcons();
+  </script>
+</body>
+</html>
